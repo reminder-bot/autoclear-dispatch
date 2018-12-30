@@ -3,11 +3,18 @@ extern crate mysql;
 extern crate dotenv;
 extern crate reqwest;
 extern crate threadpool;
+extern crate serde_json;
+extern crate serde_derive;
 
 use std::env;
 use std::thread;
 use std::time::Duration;
+use serde_derive::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Message {
+    content: String,
+}
 
 fn main() {
     dotenv::dotenv().ok();
@@ -26,12 +33,24 @@ fn main() {
     loop {
         pool.join();
 
-        let q = mysql_conn.prep_exec("SELECT channel, message FROM deletes WHERE `time` < NOW()", ()).unwrap();
+        let q = mysql_conn.prep_exec("SELECT channel, message, to_send FROM deletes WHERE `time` < NOW()", ()).unwrap();
 
         for res in q {
-            let (channel, message) = mysql::from_row::<(u64, u64)>(res.unwrap());
+            let (channel, m_id, text) = mysql::from_row::<(u64, u64, Option<String>)>(res.unwrap());
 
-            let req = send(format!("{}/channels/{}/messages/{}", URL, channel, message), &token, &req_client);
+            if let Some(t) = text {
+                let m = Message {
+                    content: t,
+                };
+
+                let req = send_message(format!("{}/channels/{}/messages", URL, channel), serde_json::to_string(&m).unwrap(), &token, &req_client);
+
+                pool.execute(move || {
+                    let _ = req.send();
+                });
+            }
+
+            let req = send(format!("{}/channels/{}/messages/{}", URL, channel, m_id), &token, &req_client);
 
             pool.execute(move || {
                 let _ = req.send();
@@ -45,6 +64,13 @@ fn main() {
 
 fn send(url: String, token: &str, client: &reqwest::Client) -> reqwest::RequestBuilder {
     client.delete(&url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bot {}", token))
+}
+
+fn send_message(url: String, m: String, token: &str, client: &reqwest::Client) -> reqwest::RequestBuilder {
+    client.post(&url)
+        .body(m)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bot {}", token))
 }
