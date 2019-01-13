@@ -40,7 +40,7 @@ fn main() {
 
             if let Some(t) = text {
                 let m = Message {
-                    content: format!("\u{200B}{}", t),
+                    content: t,
                 };
 
                 let req = send_message(format!("{}/channels/{}/messages", URL, channel), serde_json::to_string(&m).unwrap(), &token, &req_client);
