@@ -1,76 +1,93 @@
-extern crate mysql;
+#[macro_use] extern crate lazy_static;
 
 extern crate dotenv;
 extern crate reqwest;
-extern crate threadpool;
 extern crate serde_json;
 extern crate serde_derive;
 
+use sqlx::{
+    mysql::{
+        MySqlPool,
+    }
+};
+
+use serde_derive::{
+    Deserialize,
+    Serialize
+};
+
 use std::env;
-use std::thread;
 use std::time::Duration;
-use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     content: String,
 }
 
-fn main() {
-    dotenv::dotenv().ok();
+lazy_static! {
+    static ref DISCORD_TOKEN: String = {
+        format!("Bot {}", env::var("DISCORD_TOKEN").unwrap())
+    };
+}
 
-    let token = env::var("DISCORD_TOKEN").unwrap();
-    let sql_url = env::var("SQL_URL").unwrap();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv()?;
+
     let interval = env::var("INTERVAL").unwrap().parse::<u64>().unwrap();
-    let threads = env::var("THREADS").unwrap().parse::<usize>().unwrap();
 
-    const URL: &str = "https://discordapp.com/api/v6";
+    const URL: &str = "https://discord.com/api/v6";
 
-    let mysql_conn = mysql::Pool::new(sql_url).unwrap();
+    let pool = MySqlPool::new(&env::var("DATABASE_URL").expect("No database URL provided")).await.unwrap();
     let req_client = reqwest::Client::new();
-    let pool = threadpool::ThreadPool::new(threads);
 
     loop {
-        pool.join();
 
-        let q = mysql_conn.prep_exec("SELECT channel, message, to_send FROM deletes WHERE `time` < NOW()", ()).unwrap();
+        let query = sqlx::query!(
+            "
+SELECT channel, message, to_send FROM deletes WHERE `time` < NOW()
+            "
+        )
+            .fetch_all(&pool)
+            .await?;
 
-        for res in q {
-            let (channel, m_id, text) = mysql::from_row::<(u64, u64, Option<String>)>(res.unwrap());
-
-            if let Some(t) = text {
+        for row in query {
+            if let Some(text) = row.to_send {
                 let m = Message {
-                    content: t,
+                    content: text,
                 };
 
-                let req = send_message(format!("{}/channels/{}/messages", URL, channel), serde_json::to_string(&m).unwrap(), &token, &req_client);
-
-                pool.execute(move || {
-                    let _ = req.send();
-                });
+                send_message(format!("{}/channels/{}/messages", URL, row.channel), serde_json::to_string(&m).unwrap(), &req_client).await;
             }
 
-            let req = send(format!("{}/channels/{}/messages/{}", URL, channel, m_id), &token, &req_client);
-
-            pool.execute(move || {
-                let _ = req.send();
-            });
+            send_delete(format!("{}/channels/{}/messages/{}", URL, row.channel, row.message), &req_client).await;
         }
-        mysql_conn.prep_exec("DELETE FROM deletes WHERE `time` < NOW()", ()).unwrap();
 
-        thread::sleep(Duration::from_secs(interval));
+        sqlx::query!(
+            "
+DELETE FROM deletes WHERE `time` < NOW()
+            "
+        )
+            .execute(&pool)
+            .await?;
+
+        tokio::time::delay_for(Duration::from_secs(interval)).await;
     }
 }
 
-fn send(url: String, token: &str, client: &reqwest::Client) -> reqwest::RequestBuilder {
+async fn send_delete(url: String, client: &reqwest::Client) {
     client.delete(&url)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bot {}", token))
+        .header("Authorization", DISCORD_TOKEN.as_str())
+        .send()
+        .await.unwrap();
 }
 
-fn send_message(url: String, m: String, token: &str, client: &reqwest::Client) -> reqwest::RequestBuilder {
+async fn send_message(url: String, m: String, client: &reqwest::Client) {
     client.post(&url)
         .body(m)
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bot {}", token))
+        .header("Authorization", DISCORD_TOKEN.as_str())
+        .send()
+        .await.unwrap();
 }
