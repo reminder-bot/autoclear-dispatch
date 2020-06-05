@@ -26,6 +26,8 @@ pub struct Message {
 
 lazy_static! {
     static ref DISCORD_TOKEN: String = {
+        dotenv::dotenv().unwrap();
+
         format!("Bot {}", env::var("DISCORD_TOKEN").unwrap())
     };
 }
@@ -42,7 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let req_client = reqwest::Client::new();
 
     loop {
-
         let query = sqlx::query!(
             "
 SELECT channel, message, to_send FROM deletes WHERE `time` < NOW()
